@@ -114,3 +114,39 @@ service auditd restart
 Генерировать отделенные подписи (.sig)
 
 Сжимать оригинальные журналы
+# Разшифровка
+
+```bash
+#!/bin/bash
+
+INPUT_FILE="$1"
+OUTPUT_FILE="$2"
+PRIVATE_KEY="/etc/audit/private/auditd_private.pem"
+
+# Проверка наличия входного файла
+if [ ! -f "$INPUT_FILE" ]; then
+  echo "Входной файл не найден!" >&2
+  exit 1
+fi
+
+# Создание выходного файла
+> "$OUTPUT_FILE"
+
+while IFS= read -r line; do
+  # Расшифровка зашифрованной строки
+  ENCRYPTED_DATA=$(echo "$line" | openssl rsautl -decrypt -inkey "$PRIVATE_KEY")
+  
+  # Извлечение временной метки и зашифрованной строки
+  TIMESTAMP=$(echo "$ENCRYPTED_DATA" | cut -d':' -f1)
+  ENCRYPTED_LINE=$(echo "$ENCRYPTED_DATA" | cut -d':' -f2-)
+
+  # Расшифровка строки с использованием временного ключа
+  TEMP_KEY=$(cat "${OUTPUT_DIR}/$(basename "$line" .enc).key" | openssl rsautl -decrypt -inkey "$PRIVATE_KEY")
+  DECRYPTED_LINE=$(echo "$ENCRYPTED_LINE" | openssl enc -d -aes-256-cbc -pass pass:"$TEMP_KEY")
+
+  # Запись расшифрованной строки с временной меткой в выходной файл
+  echo "$TIMESTAMP: $DECRYPTED_LINE" >> "$OUTPUT_FILE"
+done < "$INPUT_FILE"
+
+echo "Расшифровка завершена. Результаты сохранены в $OUTPUT_FILE."
+```
