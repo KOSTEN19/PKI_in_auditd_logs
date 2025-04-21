@@ -63,3 +63,11 @@ while IFS= read -r line; do
   process_line "$line"
 done < "$INPUT_LOG"
 ```
+
+
+### Make executable:
+
+```bash
+chmod +x /usr/local/bin/auditd_secure_logs.sh
+chown auditd:auditd /usr/local/bin/auditd_secure_logs.sh
+```
