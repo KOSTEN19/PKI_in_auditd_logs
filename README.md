@@ -41,12 +41,9 @@ PRIVATE_KEY="/etc/audit/private/auditd_private.pem"
 
 # Функция для обновления открытого ключа
 update_public_key() {
-  # Здесь должна быть логика для обновления открытого ключа
-  # Например, можно генерировать новый ключ и сохранять его в PUBLIC_KEY
-  # Для примера просто копируем старый ключ в новый файл
-  cp "$PUBLIC_KEY" "${PUBLIC_KEY}.old"
-  openssl genpkey -algorithm RSA -out "$PUBLIC_KEY" -aes256
-  echo "Открытый ключ обновлен."
+  # Генерация нового открытого ключа из закрытого
+  openssl ec -in "$PRIVATE_KEY" -pubout -out "$PUBLIC_KEY"
+  echo "Открытый ключ обновлен: $PUBLIC_KEY"
 }
 
 # Проверка времени последнего обновления ключа
