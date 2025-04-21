@@ -28,8 +28,8 @@ chmod 640 /etc/audit/private/auditd_private_key.pem
 
 
 
-#📥 Installation
-## Save the script to /usr/local/bin/auditd_secure_logs.sh:
+## 📥 Installation
+### Save the script to /usr/local/bin/auditd_secure_logs.sh:
 
 ```bash
 #!/bin/bash
