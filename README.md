@@ -71,3 +71,22 @@ done < "$INPUT_LOG"
 chmod +x /usr/local/bin/auditd_secure_logs.sh
 chown auditd:auditd /usr/local/bin/auditd_secure_logs.sh
 ```
+
+
+### Configure auditd to trigger the script:
+
+```bash
+echo '-w /var/log/audit/audit.log -p wa -k secure_audit_log -x /usr/local/bin/auditd_secure_logs.sh' > /etc/audit/rules.d/secure_logs.rules
+service auditd restart
+```
+
+
+
+# 🚀 Usage
+## Script will automatically:
+
+Create encrypted logs in /var/log/audit/secure/
+
+Generate detached signatures (.sig)
+
+Compress original logs
