@@ -29,61 +29,84 @@ chmod 640 /etc/audit/private/auditd_private_key.pem
 
 ```bash
 #!/bin/bash
-# Шифрует только журналы высокого приоритета (приоритет >= 4)
+# Secure Log Encryptor (ECC+AES version)
+# Шифрует только логи с priority >=4, используя:
+# - ECC (prime256v1) для ключевой пары
+# - AES-256-GCM для шифрования данных
+# - Одноразовые сессионные ключи
+
 INPUT_LOG="$1"
-OUTPUT_DIR="/var/log/audit/secure"
+OUTPUT_FILE="/var/log/audit/secure/encrypted_logs.json"  # Один выходной файл
 MIN_PRIORITY=4
-KEY_UPDATE_INTERVAL=3600  # Интервал обновления открытого ключа в секундах (1 час)
+PUBLIC_KEY="/etc/audit/keys/audit_public.pem"  # Только публичный ключ
+TEMP_DIR=$(mktemp -d)                          # Безопасный временный каталог
 
-# Путь к открытым и закрытым ключам
-PUBLIC_KEY="/etc/audit/auditd_public.pem"
-PRIVATE_KEY="/etc/audit/private/auditd_private.pem"
+# Проверки безопасности
+[ "$(id -un)" = "auditd" ] || { echo "Must run as auditd" >&2; exit 1; }
+[ -f "$PUBLIC_KEY" ] || { echo "Public key not found" >&2; exit 1; }
+trap 'rm -rf "$TEMP_DIR"' EXIT                 # Удаление временных файлов при выходе
 
-# Функция для обновления открытого ключа
-update_public_key() {
-  # Генерация нового открытого ключа из закрытого
-  openssl ec -in "$PRIVATE_KEY" -pubout -out "$PUBLIC_KEY"
-  echo "Открытый ключ обновлен: $PUBLIC_KEY"
+# Функция безопасного шифрования
+encrypt_log_entry() {
+    local plaintext="$1"
+    local timestamp=$(date +%s)
+    local iv_file="$TEMP_DIR/iv.$timestamp.bin"
+    local key_file="$TEMP_DIR/key.$timestamp.bin"
+    local tag_file="$TEMP_DIR/tag.$timestamp.bin"
+
+    # 1. Генерация сессионного ключа и IV
+    openssl rand -hex 32 > "$key_file"
+    openssl rand -hex 12 > "$iv_file"  # 96-bit IV для GCM
+
+    # 2. Шифрование данных AES-256-GCM
+    local encrypted_data=$(echo -n "$plaintext" | openssl enc -aes-256-gcm \
+        -K $(cat "$key_file") \
+        -iv $(cat "$iv_file") \
+        -a -A 2>"$tag_file")
+
+    # 3. Шифрование сессионного ключа ECC
+    local encrypted_key=$(openssl pkeyutl -encrypt \
+        -pubin -inkey "$PUBLIC_KEY" \
+        -in "$key_file" \
+        -outform DER | base64 -w0)
+
+    # 4. Формирование итоговой структуры
+    local json_entry=$(jq -n \
+        --arg iv $(base64 -w0 "$iv_file") \
+        --arg tag $(base64 -w0 "$tag_file") \
+        --arg data "$encrypted_data" \
+        --arg key "$encrypted_key" \
+        '{
+            iv: $iv,
+            tag: $tag,
+            data: $data,
+            key: $key,
+            algo: "aes-256-gcm",
+            key_algo: "prime256v1",
+            timestamp: '$timestamp'
+        }')
+
+    # 5. Запись в выходной файл
+    echo "$json_entry," >> "$OUTPUT_FILE"
+
+    # 6. Очистка временных файлов
+    shred -u "$key_file" "$iv_file" "$tag_file"
 }
 
-# Проверка времени последнего обновления ключа
-if [ ! -f "/etc/audit/last_key_update" ]; then
-  touch "/etc/audit/last_key_update"
-  echo "0" > "/etc/audit/last_key_update"
-fi
+# Основной цикл обработки
+mkdir -p "$(dirname "$OUTPUT_FILE")"
+echo "[" > "$OUTPUT_FILE"  # Начало JSON массива
 
-LAST_UPDATE=$(cat /etc/audit/last_key_update)
-CURRENT_TIME=$(date +%s)
-
-if (( CURRENT_TIME - LAST_UPDATE >= KEY_UPDATE_INTERVAL )); then
-  update_public_key
-  echo "$CURRENT_TIME" > "/etc/audit/last_key_update"
-fi
-
-[ "$(id -un)" = "auditd" ] || { echo "Должен выполняться от имени auditd" >&2; exit 1; }
-
-process_line() {
-  local line="$1"
-  local pri=$(echo "$line" | grep -oP 'priority=\K\d+')
-  
-  if [ -n "$pri" ] && [ "$pri" -ge "$MIN_PRIORITY" ]; then
-    # Шифрование записей высокого приоритета
-    TEMP_KEY=$(openssl rand -hex 32)
-    echo "$line" | openssl enc -aes-256-cbc -salt -pass pass:"$TEMP_KEY" | \
-      openssl rsautl -encrypt -pubin -inkey "$PUBLIC_KEY" > \
-      "${OUTPUT_DIR}/$(date +%s).enc"
-    echo "$TEMP_KEY" | openssl rsautl -sign -inkey "$PRIVATE_KEY" >> \
-      "${OUTPUT_DIR}/$(date +%s).key"
-  else
-    # Пропуск записей низкого приоритета
-    echo "$line"
-  fi
-}
-
-mkdir -p "$OUTPUT_DIR"
 while IFS= read -r line; do
-  process_line "$line"
+    pri=$(echo "$line" | grep -oP 'priority=\K\d+')
+    if [ -n "$pri" ] && [ "$pri" -ge "$MIN_PRIORITY" ]; then
+        encrypt_log_entry "$line"
+    fi
 done < "$INPUT_LOG"
+
+# Удаление последней запятой и закрытие JSON массива
+sed -i '$ s/,$//' "$OUTPUT_FILE"  # Удаление последней запятой
+echo "]" >> "$OUTPUT_FILE"        # Закрытие JSON массива
 ```
 
 
