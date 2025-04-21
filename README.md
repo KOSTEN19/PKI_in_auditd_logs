@@ -33,18 +33,33 @@ chmod 640 /etc/audit/private/auditd_private_key.pem
 
 ```bash
 #!/bin/bash
-# OpenSSL Version
-LOG_SOURCE="/var/log/audit/audit.log"
-LOG_ENCRYPTED="/var/log/audit/secure/audit_$(date +%Y%m%d_%H%M%S).enc"
-PRIVATE_KEY="/etc/audit/private/auditd_private_key.pem"
-TEMP_FILE=$(mktemp)
+# Encrypts only high-priority logs (priority >= 4)
+INPUT_LOG="$1"
+OUTPUT_DIR="/var/log/audit/secure"
+MIN_PRIORITY=4
 
-# Sign and encrypt
-openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "${LOG_ENCRYPTED}.sig" "$LOG_SOURCE"
-openssl rand -hex 32 > "$TEMP_FILE.key"
-openssl enc -aes-256-cbc -salt -in "$LOG_SOURCE" -out "$TEMP_FILE.enc" -pass file:"$TEMP_FILE.key"
-openssl rsautl -encrypt -pubin -inkey /etc/audit/auditd_public_key.pem -in "$TEMP_FILE.key" -out "$TEMP_FILE.key.enc"
-cat "$TEMP_FILE.enc" "$TEMP_FILE.key.enc" > "$LOG_ENCRYPTED"
-rm -f "$TEMP_FILE"*
-gzip "$LOG_SOURCE"
+[ "$(id -un)" = "auditd" ] || { echo "Must run as auditd" >&2; exit 1; }
+
+process_line() {
+  local line="$1"
+  local pri=$(echo "$line" | grep -oP 'priority=\K\d+')
+  
+  if [ -n "$pri" ] && [ "$pri" -ge "$MIN_PRIORITY" ]; then
+    # Encrypt high-priority entries
+    TEMP_KEY=$(openssl rand -hex 32)
+    echo "$line" | openssl enc -aes-256-cbc -salt -pass pass:"$TEMP_KEY" | \
+      openssl rsautl -encrypt -pubin -inkey /etc/audit/auditd_public.pem > \
+      "${OUTPUT_DIR}/$(date +%s).enc"
+    echo "$TEMP_KEY" | openssl rsautl -sign -inkey /etc/audit/private/auditd_private.pem >> \
+      "${OUTPUT_DIR}/$(date +%s).key"
+  else
+    # Pass through low-priority
+    echo "$line"
+  fi
+}
+
+mkdir -p "$OUTPUT_DIR"
+while IFS= read -r line; do
+  process_line "$line"
+done < "$INPUT_LOG"
 ```
