@@ -70,12 +70,17 @@ encrypt_log_entry() {
         -in "$key_file" \
         -outform DER | base64 -w0)
 
-    # 4. Формирование итоговой структуры
+    # 4. Шифрование временной метки
+    local encrypted_timestamp=$(echo -n "$timestamp" | openssl pkeyutl -encrypt \
+        -pubin -inkey "$PUBLIC_KEY" -outform DER | base64 -w0)
+
+    # 5. Формирование итоговой структуры
     local json_entry=$(jq -n \
         --arg iv $(base64 -w0 "$iv_file") \
         --arg tag $(base64 -w0 "$tag_file") \
         --arg data "$encrypted_data" \
         --arg key "$encrypted_key" \
+        --arg timestamp "$encrypted_timestamp" \
         '{
             iv: $iv,
             tag: $tag,
@@ -83,13 +88,13 @@ encrypt_log_entry() {
             key: $key,
             algo: "aes-256-gcm",
             key_algo: "prime256v1",
-            timestamp: '$timestamp'
+            timestamp: $timestamp
         }')
 
-    # 5. Запись в выходной файл
+    # 6. Запись в выходной файл
     echo "$json_entry," >> "$OUTPUT_FILE"
 
-    # 6. Очистка временных файлов
+    # 7. Очистка временных файлов
     shred -u "$key_file" "$iv_file" "$tag_file"
 }
 
@@ -138,35 +143,57 @@ service auditd restart
 
 ```bash
 #!/bin/bash
+# Secure Log Decryptor (ECC+AES version)
+# Расшифровывает зашифрованные логи
 
-INPUT_FILE="$1"
-OUTPUT_FILE="$2"
-PRIVATE_KEY="/etc/audit/private/auditd_private.pem"
+# Параметры
+INPUT_FILE="$1"                      # Входной файл с зашифрованными данными
+OUTPUT_FILE="$2"                     # Выходной файл для расшифрованных данных
+PRIVATE_KEY="/etc/audit/keys/audit_private.pem"  # Путь к закрытому ключу
 
-# Проверка наличия входного файла
-if [ ! -f "$INPUT_FILE" ]; then
-  echo "Входной файл не найден!" >&2
-  exit 1
-fi
+# Проверки безопасности
+[ "$(id -un)" = "auditd" ] || { echo "Must run as auditd" >&2; exit 1; }
+[ -f "$INPUT_FILE" ] || { echo "Input file not found" >&2; exit 1; }
+[ -f "$PRIVATE_KEY" ] || { echo "Private key not found" >&2; exit 1; }
 
-# Создание выходного файла
-> "$OUTPUT_FILE"
+# Функция для расшифровки записи
+decrypt_log_entry() {
+    local json_entry="$1"
 
+    # Извлечение значений из JSON
+    local iv=$(echo "$json_entry" | jq -r '.iv' | base64 -d)
+    local tag=$(echo "$json_entry" | jq -r '.tag' | base64 -d)
+    local encrypted_data=$(echo "$json_entry" | jq -r '.data')
+    local encrypted_key=$(echo "$json_entry" | jq -r '.key')
+    local encrypted_timestamp=$(echo "$json_entry" | jq -r '.timestamp')
+
+    # Расшифровка сессионного ключа
+    local decrypted_key=$(echo "$encrypted_key" | base64 -d | openssl pkeyutl -decrypt -inkey "$PRIVATE_KEY" -outform DER | xxd -p)
+
+    # Расшифровка временной метки
+    local decrypted_timestamp=$(echo "$encrypted_timestamp" | base64 -d | openssl pkeyutl -decrypt -inkey "$PRIVATE_KEY" -outform DER | xxd -p)
+
+    # Расшифровка данных AES-256-GCM
+    local decrypted_data=$(echo -n "$encrypted_data" | base64 -d | openssl enc -aes-256-gcm -d -K "$decrypted_key" -iv <(echo -n "$iv" | xxd -p) -A -nosalt -tag "$tag")
+
+    # Форматирование результата
+    echo "$decrypted_data (timestamp: $decrypted_timestamp)"
+}
+
+# Основной цикл обработки
+mkdir -p "$(dirname "$OUTPUT_FILE")"
+echo "[" > "$OUTPUT_FILE"  # Начало JSON массива
+
+# Чтение входного файла и расшифровка каждой записи
 while IFS= read -r line; do
-  # Расшифровка зашифрованной строки
-  ENCRYPTED_DATA=$(echo "$line" | openssl rsautl -decrypt -inkey "$PRIVATE_KEY")
-  
-  # Извлечение временной метки и зашифрованной строки
-  TIMESTAMP=$(echo "$ENCRYPTED_DATA" | cut -d':' -f1)
-  ENCRYPTED_LINE=$(echo "$ENCRYPTED_DATA" | cut -d':' -f2-)
-
-  # Расшифровка строки с использованием временного ключа
-  TEMP_KEY=$(cat "${OUTPUT_DIR}/$(basename "$line" .enc).key" | openssl rsautl -decrypt -inkey "$PRIVATE_KEY")
-  DECRYPTED_LINE=$(echo "$ENCRYPTED_LINE" | openssl enc -d -aes-256-cbc -pass pass:"$TEMP_KEY")
-
-  # Запись расшифрованной строки с временной меткой в выходной файл
-  echo "$TIMESTAMP: $DECRYPTED_LINE" >> "$OUTPUT_FILE"
+    if [[ "$line" == *"{"* ]]; then  # Проверка на наличие JSON объекта
+        decrypted_entry=$(decrypt_log_entry "$line")
+        echo "$decrypted_entry," >> "$OUTPUT_FILE"
+    fi
 done < "$INPUT_FILE"
 
-echo "Расшифровка завершена. Результаты сохранены в $OUTPUT_FILE."
-```
+# Удаление последней запятой и закрытие JSON массива
+sed -i '$ s/,$//' "$OUTPUT_FILE"  # Удаление последней запятой
+echo "]" >> "$OUTPUT_FILE"        # Закрытие JSON массива
+
+echo "Decryption completed. Output written to $OUTPUT_FILE."
